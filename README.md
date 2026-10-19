@@ -1,6 +1,6 @@
 # RTE Hosting — Minecraft Java Server Manager
 
-**Starter release v0.1.0** — a functional Python/Windows server launcher and modern browser-based control panel themed with RTE Hosting's provided graphics. This is an initial implementation, **not a production multitenant hosting platform**.
+**Development release v0.2.0** — a functional Python/Windows server launcher and modern browser-based control panel themed with RTE Hosting's provided graphics. This is an initial implementation, **not a production multitenant hosting platform**.
 
 ## Included now
 
