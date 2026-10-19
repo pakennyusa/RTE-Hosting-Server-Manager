@@ -15,7 +15,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install Windows build dependencies.'
 & $python -m PyInstaller --noconfirm --clean --onedir --windowed --name RTEHosting `
   --icon build\rte-hosting.ico `
   --add-data 'rte_hosting\static;rte_hosting\static' `
-  --collect-all webview --hidden-import webview.platforms.edgechromium `
+  --collect-all webview --collect-all paramiko --hidden-import webview.platforms.edgechromium `
   run.py
 if ($LASTEXITCODE -ne 0) { throw 'PyInstaller build failed.' }
 
@@ -25,6 +25,6 @@ if (-not $iscc) { throw 'Install Inno Setup 6 first: https://jrsoftware.org/isin
 & $iscc build\RTEHosting.iss
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed.' }
 
-$installer = 'release\RTEHosting-Setup-v0.1.0.exe'
+$installer = 'release\RTEHosting-Setup-v0.2.0.exe'
 if (-not (Test-Path $installer)) { throw "Expected installer not found: $installer" }
 Write-Host "Build complete: $installer"

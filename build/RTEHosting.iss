@@ -1,6 +1,6 @@
 ; RTE Hosting branded Windows installer (Inno Setup 6)
 #define MyAppName "RTE Hosting Server Manager"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppExeName "RTEHosting.exe"
 [Setup]
 AppId={{2C2EE05B-9B35-4B2B-8B57-126C2259E874}

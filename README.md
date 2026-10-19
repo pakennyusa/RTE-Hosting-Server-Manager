@@ -97,3 +97,7 @@ py -3.12 -m unittest discover -s tests -v
 ## Brand assets
 
 `rte_hosting/static/logo.png` and `rte_hosting/static/brand-bg.jpg` are derived from the graphics provided for this project. The original colors informed the cobalt/electric-blue, white and charcoal palette.
+
+## v0.2.0 update
+
+See [RELEASE_NOTES_v0.2.md](RELEASE_NOTES_v0.2.md) for import-in-place, automatic Java detection, official framework downloads, optional built-in SFTP, RDP connection profiles, security cautions and upgrade instructions. An in-place import **does not copy worlds**, but it does allow operations to modify the original directory. Forge/NeoForge and other complex installers remain manual.

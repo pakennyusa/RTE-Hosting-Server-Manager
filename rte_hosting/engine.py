@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-APP_VERSION = '0.1.0'
+APP_VERSION = '0.2.0'
 FRAMEWORKS = ['Vanilla', 'Paper', 'Spigot', 'Purpur', 'Bukkit', 'Fabric', 'Forge', 'NeoForge', 'Quilt', 'Mohist', 'Arclight', 'Other']
 DATA_ROOT = Path(os.getenv('RTE_HOSTING_DATA') or (Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'RTE Hosting')).expanduser().resolve()
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
@@ -72,7 +72,7 @@ def init_db():
                 launch_mode TEXT NOT NULL DEFAULT 'jar', java_path TEXT NOT NULL DEFAULT 'java',
                 min_ram INTEGER NOT NULL DEFAULT 1024, max_ram INTEGER NOT NULL DEFAULT 2048,
                 port INTEGER NOT NULL UNIQUE, eula_accepted INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL, workspace TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS assignments (
                 server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
@@ -87,6 +87,8 @@ def init_db():
                 actor TEXT NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL
             );
         ''')
+        if 'workspace' not in {r['name'] for r in db.execute('PRAGMA table_info(servers)')}:
+            db.execute("ALTER TABLE servers ADD COLUMN workspace TEXT NOT NULL DEFAULT ''")
 
 
 def rows(sql, args=()):
@@ -175,7 +177,8 @@ def logout(token):
 def server_dir(server_id):
     if not re.fullmatch(r'[a-f0-9-]{36}', str(server_id)):
         raise ValueError('Invalid server ID.')
-    return SERVERS_ROOT / server_id
+    record = one('SELECT workspace FROM servers WHERE id=?',(server_id,))
+    return Path(record['workspace']) if record and record.get('workspace') else SERVERS_ROOT / server_id
 
 
 def safe_server_path(server_id, relative):
@@ -188,8 +191,12 @@ def safe_server_path(server_id, relative):
     candidate = (base / relative).resolve()
     if not candidate.is_relative_to(base):
         raise PermissionError('Path must remain inside the server directory.')
-    if candidate.is_symlink():
-        raise PermissionError('Symbolic links are not supported.')
+    # Reject symlinks/junctions at any nested component, including in-root links.
+    check = base
+    for part in Path(relative).parts:
+        check = check / part
+        if check.is_symlink() or (os.name == 'nt' and check.exists() and bool(check.stat(follow_symlinks=False).st_file_attributes & 0x400)):
+            raise PermissionError('Symbolic links and junctions are not supported.')
     return candidate
 
 
@@ -221,7 +228,7 @@ def create_server(body):
     execute('''INSERT INTO servers(id,name,framework,version,jar,launch_mode,java_path,
           min_ram,max_ram,port,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
           (sid,name,framework,str(body.get('version',''))[:40],jar,mode,
-           str(body.get('java_path','java'))[:300],min_ram,max_ram,port,utc_now()))
+           str(body.get('java_path','auto'))[:300],min_ram,max_ram,port,utc_now()))
     folder = server_dir(sid)
     folder.mkdir(mode=0o700)
     (folder / 'eula.txt').write_text('eula=false\n', encoding='utf-8')
@@ -249,6 +256,8 @@ def visible_servers(user):
         result = rows('''SELECT servers.* FROM servers JOIN assignments
          ON servers.id=assignments.server_id WHERE assignments.user_id=? ORDER BY servers.name''', (user['id'],))
     for s in result:
+        if user['role']=='customer':
+            s.pop('workspace',None)
         s['running'] = MANAGER.is_running(s['id'])
         s['can_control'] = user['role'] != 'customer' or bool(one('SELECT can_control FROM assignments WHERE user_id=? AND server_id=?', (user['id'],s['id']))['can_control'])
     return result
@@ -327,17 +336,30 @@ class MinecraftManager:
 
     def start(self, server):
         sid = server['id']
-        folder = server_dir(sid)
+        folder = server_dir(sid).resolve()
         with self.lock:
             if self.is_running(sid):
                 raise ValueError('Server is already running.')
             if not server['eula_accepted']:
                 raise ValueError('Minecraft EULA has not been accepted for this server.')
+            from . import provisioning
+            runtime = server['java_path']
+            if runtime == 'auto':
+                candidate = provisioning.choose_java(server['version'])
+                if not candidate['best']:
+                    raise ValueError(f'No suitable Java installation detected. Recommended: Java {candidate["recommended_major"]}+. Install Java or select a runtime.')
+                runtime = candidate['best']['path']
+            elif runtime == 'java' and not shutil.which('java'):
+                raise ValueError('Java was not found on PATH. Install a JDK or choose a detected Java runtime.')
+            environment = os.environ.copy()
+            if runtime not in ('auto','java'):
+                environment['JAVA_HOME'] = str(Path(runtime).parent.parent)
+                environment['PATH'] = str(Path(runtime).parent) + os.pathsep + environment.get('PATH','')
             if server['launch_mode'] == 'jar':
                 jar = folder / validate_jar_name(server['jar'])
                 if not jar.is_file():
                     raise ValueError(f'Upload {server["jar"]} to the server file manager before starting.')
-                args = [server['java_path'], f'-Xms{server["min_ram"]}M', f'-Xmx{server["max_ram"]}M', '-jar',jar.name,'nogui']
+                args = [runtime, f'-Xms{server["min_ram"]}M', f'-Xmx{server["max_ram"]}M', '-jar',jar.name,'nogui']
             else:
                 if os.name != 'nt':
                     raise ValueError('The modded run.bat mode requires Windows.')
@@ -349,7 +371,7 @@ class MinecraftManager:
             try:
                 proc = subprocess.Popen(args, cwd=folder, stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    encoding='utf-8', errors='replace',bufsize=1,creationflags=creationflags)
+                    encoding='utf-8', errors='replace',bufsize=1,creationflags=creationflags,env=environment)
             except OSError as exc:
                 raise ValueError(f'Failed to launch server: {exc}') from exc
             self.procs[sid] = proc
@@ -440,3 +462,96 @@ def backup_list(sid):
     if not folder.exists():
         return []
     return [{'name':p.name,'size':p.stat().st_size} for p in sorted(folder.glob('*.zip'),reverse=True)[:100]]
+
+
+def inspect_existing_server(directory):
+    """Read an existing server *without changing any files*. Returns suggested configuration."""
+    base = Path(directory).expanduser()
+    if not base.is_absolute() or not base.is_dir() or base.is_symlink():
+        raise ValueError('Import requires an existing absolute, non-symlink directory.')
+    base = base.resolve(strict=True)
+    if base == base.parent or base == DATA_ROOT or base == SERVERS_ROOT or base == BACKUPS_ROOT:
+        raise ValueError('Choose the Minecraft instance folder, not a drive or RTE data root.')
+    if (os.name == 'nt' and str(base).startswith('\\\\')):
+        raise ValueError('Network share paths are not supported for managed Java processes.')
+    if not os.access(base, os.R_OK | os.W_OK):
+        raise PermissionError('The service account must be able to read and write this folder.')
+    jars = sorted((p.name for p in base.glob('*.jar') if p.is_file() and not p.is_symlink()),key=str.casefold)
+    selected = next((x for x in jars if x.lower() == 'server.jar'), None)
+    selected = selected or next((x for x in jars if any(z in x.casefold() for z in ('paper','purpur','fabric','mohist','arclight','forge','spigot'))),None)
+    selected = selected or (jars[0] if jars else None)
+    props = {}
+    file = base / 'server.properties'
+    if file.is_file() and file.stat().st_size < 1024 * 1024:
+        for line in file.read_text('utf-8',errors='replace').splitlines():
+            if '=' in line and not line.lstrip().startswith('#'):
+                key,value = line.split('=',1)
+                props[key.strip()] = value.strip()
+    guessed = 'Other'
+    word = ' '.join(jars).lower()
+    for name in ('NeoForge','Forge','Fabric','Quilt','Mohist','Arclight','Purpur','Paper','Spigot','Bukkit'):
+        if name.casefold() in word or (name in ('NeoForge','Forge') and (base / 'libraries').is_dir() and name.casefold() in ' '.join(str(p).lower() for p in (base / 'libraries').iterdir())):
+            guessed = name
+            break
+    if guessed == 'Other' and selected and selected.lower() == 'server.jar':
+        guessed = 'Vanilla'
+    script = (base/'run.bat').is_file()
+    mode = 'script' if script and (not selected or guessed in ('Forge','NeoForge')) else 'jar'
+    try:
+        port = int(props.get('server-port',25565))
+    except ValueError:
+        port = 25565
+    if not 1024 <= port <= 65535:
+        port = 25565
+    eula = (base/'eula.txt').is_file() and any(x.strip().lower() == 'eula=true' for x in (base/'eula.txt').read_text('utf-8',errors='replace').splitlines())
+    return {'path':str(base),'name':base.name[:64], 'framework':guessed,'jar':selected or 'server.jar',
+            'launch_mode':mode,'port':port,'eula_accepted':eula,'jar_candidates':jars[:50],
+            'has_run_script':script, 'has_world':(base/'world').is_dir()}
+
+
+def import_server(body):
+    if body.get('acknowledge_external_write') is not True:
+        raise ValueError('Confirm that RTE Hosting may write directly to the selected external folder.')
+    meta = inspect_existing_server(str(body.get('path','')))
+    if one('SELECT id FROM servers WHERE workspace=?',(meta['path'],)):
+        raise ValueError('This directory is already managed by RTE Hosting.')
+    # Reject overlap with another managed instance, preventing cross-server file access.
+    directory = Path(meta['path'])
+    for item in rows("SELECT workspace FROM servers WHERE workspace != ''"):
+        existing = Path(item['workspace'])
+        if directory.is_relative_to(existing) or existing.is_relative_to(directory):
+            raise ValueError('Overlapping server directories cannot be imported.')
+    opts = dict(meta, **{k:v for k,v in body.items() if k not in ('path','acknowledge_external_write')})
+    name = str(opts.get('name','')).strip()
+    if not 3 <= len(name) <= 64:
+        raise ValueError('Server name must be 3–64 characters.')
+    framework = str(opts.get('framework',meta['framework']))
+    if framework not in FRAMEWORKS:
+        raise ValueError('Invalid framework.')
+    port,min_ram,max_ram = int(opts.get('port',meta['port'])),int(opts.get('min_ram',1024)),int(opts.get('max_ram',4096))
+    if not 1024 <= port <= 65535 or not 256 <= min_ram <= max_ram <= 131072:
+        raise ValueError('Invalid port or RAM allocation.')
+    mode = str(opts.get('launch_mode',meta['launch_mode']))
+    if mode not in ('jar','script'):
+        raise ValueError('Invalid launch mode.')
+    jar = validate_jar_name(str(opts.get('jar',meta['jar'])))
+    if mode == 'jar' and not (directory/jar).is_file():
+        raise ValueError(f'{jar} not found in the selected directory.')
+    if mode == 'script' and not (directory/'run.bat').is_file():
+        raise ValueError('run.bat is not present in the imported directory.')
+    sid = str(uuid.uuid4())
+    execute("""INSERT INTO servers(id,name,framework,version,jar,launch_mode,java_path,min_ram,max_ram,port,
+             eula_accepted,created_at,workspace) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (sid,name,framework,str(opts.get('version',''))[:40],jar,mode,
+             str(opts.get('java_path','auto'))[:300],min_ram,max_ram,port,int(meta['eula_accepted']),utc_now(),str(directory)))
+    return sid,meta
+
+
+def update_runtime(sid, java_path):
+    if MANAGER.is_running(sid):
+        raise ValueError('Stop the server before changing its Java runtime.')
+    from . import provisioning
+    options = provisioning.detect_java()
+    if java_path not in ('java','auto') and java_path not in [x['path'] for x in options]:
+        raise ValueError('Select a discovered Java executable.')
+    execute('UPDATE servers SET java_path=? WHERE id=?',(java_path,sid))

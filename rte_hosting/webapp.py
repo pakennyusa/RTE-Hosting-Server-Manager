@@ -25,6 +25,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import engine as e
+from . import provisioning
 
 STATIC = Path(__file__).resolve().parent / 'static'
 LOGIN_ATTEMPTS = {}
@@ -44,7 +45,7 @@ def clean_relative(name):
 
 
 class PortalHandler(SimpleHTTPRequestHandler):
-    server_version = 'RTEHosting/0.1'
+    server_version = 'RTEHosting/0.2'
     sys_version = ''
 
     def __init__(self, *args, **kwargs):
@@ -208,6 +209,48 @@ class PortalHandler(SimpleHTTPRequestHandler):
             sid = e.create_server(body)
             e.log_audit(auth['username'],'server_created',sid+' '+body['name'])
             return self.json({'id':sid},201)
+        if method=='GET' and path=='/api/java':
+            self.require_staff(auth)
+            return self.json({'runtimes':provisioning.detect_java()})
+        if method=='GET' and path=='/api/framework/versions':
+            self.require_staff(auth)
+            framework = get('framework')
+            return self.json({'framework':framework,'versions':provisioning.available_versions(framework)})
+        if method=='POST' and path=='/api/import/inspect':
+            self.require_staff(auth)
+            body = self.body_json()
+            return self.json({'inspection':e.inspect_existing_server(body.get('path',''))})
+        if method=='POST' and path=='/api/import':
+            self.require_staff(auth)
+            body = self.body_json()
+            sid, meta = e.import_server(body)
+            e.log_audit(auth['username'],'server_imported',sid+' '+meta['path'])
+            return self.json({'id':sid, 'inspection':meta},201)
+        if method=='GET' and path=='/api/admin/remote':
+            self.require_staff(auth)
+            return self.json({'sftp_enabled': bool(getattr(self.server,'sftp_enabled',False)),
+                              'sftp_port':getattr(self.server,'sftp_port',None),
+                              'sftp_host':getattr(self.server,'sftp_host','127.0.0.1'),
+                              'rdp_configured':bool(os.environ.get('RTE_RDP_HOST'))})
+        if method=='GET' and path=='/api/admin/rdp':
+            self.require_staff(auth,admin_only=True)
+            host = os.environ.get('RTE_RDP_HOST','')
+            if not re.fullmatch(r'[A-Za-z0-9.:-]{1,253}',host):
+                raise APIError(400,'Set a valid RTE_RDP_HOST environment variable before creating RDP profiles.')
+            lines = ('full address:s:'+host, 'prompt for credentials on client:i:1',
+                     'authentication level:i:2', 'enablecredsspsupport:i:1',
+                     'redirectclipboard:i:0', 'drivestoredirect:s:',
+                     'administrative session:i:0', 'screen mode id:i:2')
+            blob=('\r\n'.join(lines)+'\r\n').encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type','application/x-rdp')
+            self.send_header('Content-Disposition','attachment; filename="RTE-Hosting-Remote-Desktop.rdp"')
+            self.send_header('Cache-Control','no-store')
+            self.send_header('Content-Length',str(len(blob)))
+            self.end_headers()
+            self.wfile.write(blob)
+            e.log_audit(auth['username'],'rdp_profile_downloaded','Configuration only; Windows RDP authentication remains separate')
+            return
         if method=='GET' and path=='/api/admin/users':
             self.require_staff(auth)
             return self.json({'users':[e.safe_user(u) for u in e.rows('SELECT * FROM users ORDER BY username')]})
@@ -254,8 +297,20 @@ class PortalHandler(SimpleHTTPRequestHandler):
             server, perms = self.require_server(auth,sid)
             sub = '/' + '/'.join(parts[4:]) if len(parts)>4 else ''
             if method=='GET' and not sub:
-                return self.json({'server':dict(server,running=e.MANAGER.is_running(sid)),
+                return self.json({'server':dict((server if auth['role']!='customer' else {k:v for k,v in server.items() if k!='workspace'}),running=e.MANAGER.is_running(sid)),
                     'permissions':perms,'properties':e.read_properties(sid)})
+            if method=='POST' and sub=='/runtime/java':
+                self.require_staff(auth)
+                data = self.body_json()
+                e.update_runtime(sid,str(data.get('java_path','')))
+                e.log_audit(auth['username'],'java_updated',sid)
+                return self.json({'ok':True})
+            if method=='POST' and sub=='/framework/install':
+                self.require_staff(auth)
+                data = self.body_json()
+                result=provisioning.download_framework(server,str(data.get('framework','')),str(data.get('version','')))
+                e.log_audit(auth['username'],'framework_installed',sid+' '+result['framework']+' '+result['version'])
+                return self.json({'installed':result})
             if method=='GET' and sub=='/console':
                 self.require_server(auth,sid,'can_console')
                 return self.json({'lines':list(e.MANAGER.tail(sid,150)), 'running':e.MANAGER.is_running(sid)})
@@ -442,8 +497,18 @@ def main():
     parser.add_argument('--host',default=os.getenv('RTE_HOST','127.0.0.1'))
     parser.add_argument('--port',type=int,default=int(os.getenv('RTE_PORT','8080')))
     parser.add_argument('--headless',action='store_true',help='Do not open a desktop window')
+    parser.add_argument('--sftp-port',type=int,default=int(os.getenv('RTE_SFTP_PORT','0')),help='Enable authenticated SSH/SFTP file service on this port (disabled by default).')
+    parser.add_argument('--sftp-host',default='127.0.0.1',help='SFTP bind address; localhost is safest.')
     args = parser.parse_args()
     app = start_server(args.host,args.port)
+    sftp_listener = None
+    if args.sftp_port:
+        from . import sftp_service
+        sftp_listener = sftp_service.start_sftp(args.sftp_host,args.sftp_port)
+        app.sftp_enabled=True
+        app.sftp_port=args.sftp_port
+        app.sftp_host=args.sftp_host
+        print(f'RTE SFTP listening at {args.sftp_host}:{args.sftp_port}')
     url = f'http://127.0.0.1:{args.port}'
     print(f'RTE Hosting {e.APP_VERSION} listening at {url}')
     if args.headless:
@@ -454,6 +519,7 @@ def main():
         finally:
             e.MANAGER.shutdown_all()
             app.server_close()
+            if sftp_listener:sftp_listener.close()
         return
     threading.Thread(target=app.serve_forever,daemon=True).start()
     try:
@@ -472,6 +538,7 @@ def main():
         e.MANAGER.shutdown_all()
         app.shutdown()
         app.server_close()
+        if sftp_listener:sftp_listener.close()
 
 if __name__ == '__main__':
     main()

@@ -27,3 +27,9 @@ This project is a **local-first prototype** and should not be treated as product
 ## Scope of this release
 
 The included installer adds a per-user desktop application, not a background Windows Service. RDP and SFTP are not created by installing the package. Do not confuse role restrictions in the web portal with a Windows sandbox.
+
+## v0.2 additions
+
+SFTP is disabled by default. It is encrypted and limited to assigned server file trees, but it does not isolate arbitrary executable mod/plugin code: **Minecraft processes and RTE Hosting still run under the same OS identity.** Require a VPN/SSH tunnel for remote file access, avoid weak passwords, and block untrusted ports at the Windows firewall. The SFTP host key is persisted under the per-user RTE data folder; protect that folder's Windows NTFS ACLs and back up the private key securely. RDP profiles have no passwords; they do not provision local Windows accounts or remote access rights. Never give non-staff users RDP host access.
+
+Imported server directories are actively managed in place. Always stop any preexisting Minecraft process first, confirm the import target, and ensure file permissions restrict other tenants. Framework downloads are restricted to official HTTPS endpoints and require a stopped server. Back up worlds before making framework changes.

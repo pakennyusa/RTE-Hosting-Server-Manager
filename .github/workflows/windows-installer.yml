@@ -30,6 +30,9 @@ jobs:
           python-version: '3.12'
           architecture: x64
 
+      - name: Install SFTP test dependency
+        run: python -m pip install 'paramiko>=3.4,<5'
+
       - name: Run Python unit and API tests
         shell: pwsh
         run: python -m unittest discover -s tests -v
@@ -62,7 +65,7 @@ jobs:
               if ($proc.HasExited) { throw "Packaged executable exited unexpectedly (code $($proc.ExitCode))." }
               try {
                 $data = Invoke-RestMethod -Uri 'http://127.0.0.1:18765/api/bootstrap/status' -TimeoutSec 2
-                if ($data.version -eq '0.1.0' -and $data.needs_setup -eq $true) {
+                if ($data.version -eq '0.2.0' -and $data.needs_setup -eq $true) {
                   $ready = $true
                   break
                 }
@@ -87,7 +90,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: RTEHosting-Windows-Installer
-          path: release/RTEHosting-Setup-v0.1.0.exe
+          path: release/RTEHosting-Setup-v0.2.0.exe
           if-no-files-found: error
           retention-days: 30
 
