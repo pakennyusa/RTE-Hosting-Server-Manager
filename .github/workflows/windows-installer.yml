@@ -1,0 +1,100 @@
+name: Build RTE Hosting Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'rte_hosting/**'
+      - 'run.py'
+      - 'requirements-build.txt'
+      - 'tests/**'
+      - 'build/**'
+      - '.github/workflows/windows-installer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Test and build Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 (x64)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      - name: Run Python unit and API tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $known = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Program Files\Inno Setup 6\ISCC.exe')
+          if (-not ($known | Where-Object { Test-Path $_ })) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Chocolatey failed to install Inno Setup 6.' }
+          }
+
+      - name: Build desktop application and branded installer
+        shell: pwsh
+        run: .\build\build-windows.ps1
+
+      - name: Smoke test packaged Windows executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:RTE_HOSTING_DATA = Join-Path $env:RUNNER_TEMP 'rte-hosting-smoke'
+          $exe = Join-Path $PWD 'dist\RTEHosting\RTEHosting.exe'
+          if (-not (Test-Path $exe)) { throw 'Packaged executable is missing.' }
+          $proc = Start-Process -FilePath $exe -ArgumentList @('--headless', '--port', '18765') -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              if ($proc.HasExited) { throw "Packaged executable exited unexpectedly (code $($proc.ExitCode))." }
+              try {
+                $data = Invoke-RestMethod -Uri 'http://127.0.0.1:18765/api/bootstrap/status' -TimeoutSec 2
+                if ($data.version -eq '0.1.0' -and $data.needs_setup -eq $true) {
+                  $ready = $true
+                  break
+                }
+              } catch { }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) { throw 'Packaged portal did not respond to the bootstrap smoke test.' }
+            $page = Invoke-WebRequest -Uri 'http://127.0.0.1:18765/' -TimeoutSec 10
+            if ($page.StatusCode -ne 200 -or $page.Content -notmatch 'RTE Hosting') {
+              throw 'Packaged UI did not serve the expected landing page.'
+            }
+            $appjs = Invoke-WebRequest -Uri 'http://127.0.0.1:18765/app.js' -TimeoutSec 10
+            if ($appjs.StatusCode -ne 200 -or $appjs.Content.Length -lt 500) {
+              throw 'Packaged UI JavaScript was missing or empty.'
+            }
+            Write-Host 'Windows executable API and static UI smoke tests passed.'
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Publish Windows setup executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTEHosting-Windows-Installer
+          path: release/RTEHosting-Setup-v0.1.0.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish standalone portable Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTEHosting-Portable
+          path: dist/RTEHosting/
+          if-no-files-found: error
+          retention-days: 30
