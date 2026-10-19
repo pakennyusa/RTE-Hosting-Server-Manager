@@ -99,7 +99,7 @@ class HostingAPITests(unittest.TestCase):
         s,r,_=self.request('GET',f'/api/servers/{sid}/backups',cookie=customer_cookie)
         self.assertEqual(len(r['backups']),1)
         s,r,_=self.request('GET',f'/api/servers/{sid}/files',cookie=customer_cookie)
-        self.assertEqual(s,200)
+        self.assertEqual(s,200,r)
         self.assertTrue(any(f['name']=='eula.txt' for f in r['files']))
         s,r,_=self.request('GET','/api/admin/users',cookie=customer_cookie)
         self.assertEqual(s,403)
