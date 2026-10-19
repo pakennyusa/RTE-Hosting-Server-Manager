@@ -410,7 +410,7 @@ def list_files(server_id, relative=''):
         try:
             s = p.stat()
             items.append({'name':p.name,'directory':p.is_dir(),'size':s.st_size if p.is_file() else 0,
-                          'path':str(p.relative_to(server_dir(server_id))).replace('\\','/')})
+                          'path':str(p.relative_to(server_dir(server_id).resolve())).replace('\\','/')})
         except OSError:
             continue
     return sorted(items,key=lambda i:(not i['directory'],i['name'].casefold()))[:1500]
