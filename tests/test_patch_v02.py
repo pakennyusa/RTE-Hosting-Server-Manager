@@ -103,11 +103,11 @@ class ImportAndProvisioningTests(unittest.TestCase):
         fs=sftp_service.VirtualFiles(user)
         with self.assertRaises(PermissionError):fs.path('/'+sid+'/world/level.dat')
         e.execute('INSERT INTO assignments(server_id,user_id,can_files) VALUES(?,?,1)',(sid,uid))
-        self.assertEqual(fs.path('/'+sid+'/world/level.dat'),self.folder/'world'/'level.dat')
+        self.assertEqual(fs.path('/'+sid+'/world/level.dat').resolve(),(self.folder/'world'/'level.dat').resolve())
         with self.assertRaises(PermissionError):fs.path('/'+sid+'/eula.txt',write=True)
         with self.assertRaises(PermissionError):fs.path('/'+sid+'/../other-server/keys')
         with self.assertRaises(PermissionError):fs.path('/'+sid+'/evil.jar',write=True)
-        self.assertEqual(fs.path('/'+sid+'/mods/test.jar',write=True),self.folder/'mods'/'test.jar')
+        self.assertEqual(fs.path('/'+sid+'/mods/test.jar',write=True).resolve(),(self.folder/'mods'/'test.jar').resolve())
 
 if __name__=='__main__':unittest.main()
 
